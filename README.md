@@ -36,7 +36,7 @@
   Start the script with:
     ```bash
     python glowSense.py
-    This will start the dynamic lighting system, responding to Tesla Model 3 events.
+  This will start the dynamic lighting system, responding to Tesla Model 3 events.
 
 ## License
   This project is licensed under the GNU General Public License v3.0. You are free to use, modify, and distribute this software for personal use, as long as any derivative works are also open-source under the same license. See the LICENSE file for more details.
