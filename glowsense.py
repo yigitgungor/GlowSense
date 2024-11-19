@@ -1,5 +1,5 @@
 """
-GlowSense
+GlowSense: Dynamic Ambient Lighting for Legacy Model 3
 ---------------------
 A Python script to control an RGB LED strip based on Tesla Model 3 CAN data 
 received via the Enhance Commander 2 interface.
@@ -10,7 +10,7 @@ Features:
 - Automatically retries connection on startup issues.
 
 Author: Yigit Gungor
-License: CC BY-NC 4.0 (See LICENSE file for details)
+License: GNU General Public License v3.0 (See LICENSE file for details)
 """
 
 import socket
