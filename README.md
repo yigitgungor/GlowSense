@@ -21,7 +21,7 @@
 
   Raspberry Pi Zero W
   RGB LED strip connected via GPIO
-  Ensure your Raspberry Pi has internet access and Wi-Fi setup for communication with the Tesla Model 3.
+  Ensure your Raspberry Pi has internet access and Wi-Fi setup for communication with the Commander 2 on a Tesla Model 3.
 
 3. **Install dependencies**:
   GlowSense requires Python 3 and some libraries:
@@ -35,7 +35,7 @@
 5. **Run the script**:
   Start the script with:
     ```bash
-    python glowSense.py
+    python glowsense.py
   This will start the dynamic lighting system, responding to Tesla Model 3 events.
 
 ## License
