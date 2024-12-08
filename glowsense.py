@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 import socket
 import struct
 import time
@@ -13,6 +15,7 @@ framesToFilter = [
     [0, 0x399],
     [0, 0x33A],
     [0, 0x204],
+    [0, 0x273],
 ]
 
 def extractValue(data_, valuedef):
@@ -32,8 +35,8 @@ def extractValue(data_, valuedef):
         calculatedValue = float(calculatedValue) * valuedef['factor'] + valuedef['offset']
     return calculatedValue
 
-def get_bit_data(frame, start_bit, length):
-    signal = extractValue(frame, {'byteorder': 'little', 'bitlength': length, 'bitstart': start_bit, 'signed': False, 'factor': 1, 'offset': 0})
+def get_bit_data(frame, start_bit, length, factor=1, offset=0):
+    signal = extractValue(frame, {'byteorder': 'little', 'bitlength': length, 'bitstart': start_bit, 'signed': False, 'factor': factor, 'offset': offset})
     return signal
 
 def process_signal(raw_signal, value_map):
@@ -60,12 +63,22 @@ def parse_turn_signals(turn_signal_frame):
     return left_turn_signal_status, right_turn_signal_status
 
 def parse_soc(soc_frame):
-    soc_start_bit = 48 #maybe 27|7
+    soc_start_bit = 27 #maybe 27|7
     soc_signal_length = 7
 
     soc = get_bit_data(soc_frame, soc_start_bit, soc_signal_length)
 
     return soc
+
+def parse_brightness(ui_frame):
+    brightness_start_bit = 32
+    brightness_signal_length = 8
+    brightness_factor = 0.5
+    brightness_offset = 0
+
+    brightness = get_bit_data(ui_frame, brightness_start_bit, brightness_signal_length, brightness_factor, brightness_offset)
+
+    return brightness
 
 def parse_charge_status(charge_status_frame):
     charge_status_start_bit = 56
@@ -107,6 +120,7 @@ def parse_autopilot_and_blindspot_signals(autopilot_blindspot_frame):
             3: "ACTIVE_NOMINAL",
             4: "ACTIVE_RESTRICTED",
             5: "ACTIVE_NAV",
+            6: "FSD?",
             8: "ABORTING",
             9: "ABORTED",
             14: "FAULT",
@@ -137,8 +151,8 @@ def parse_autopilot_and_blindspot_signals(autopilot_blindspot_frame):
 doshutdown = False
 def heartbeatFunction():
     while True:
-        time.sleep(4)
-        print("sending ehllo")
+        time.sleep(3)
+        print("heartbeat")
         sock.sendto(b"ehllo", (targetIP, targetPort))
         if doshutdown:
             break
@@ -159,60 +173,63 @@ def parsePandaPacket(data):
     return (frameBusId, frameID, frameLength, frameData)
 #endregion
 
-#region LED Configuration
+#region LED configuration
 
-# LED strip configuration:
-LED_COUNT = 60      # Number of LEDs in the strip
-LED_PIN = 18        # GPIO pin connected to the strip (must support PWM)
-LED_FREQ_HZ = 800000  # LED signal frequency in hertz (usually 800kHz)
-LED_DMA = 10        # DMA channel to use for generating signal
-LED_BRIGHTNESS = 255  # Brightness (0-255)
-LED_INVERT = False   # True to invert the signal
-LED_CHANNEL = 0      # Channel to use
+signal_threads = {
+    "left_turn": {"event": threading.Event(), "thread": None},
+    "right_turn": {"event": threading.Event(), "thread": None},
+    "left_blindspot": {"event": threading.Event(), "thread": None},
+    "right_blindspot": {"event": threading.Event(), "thread": None},
+    "charging": {"event": threading.Event(), "thread": None},
+    "hands_on": {"event": threading.Event(), "thread": None}
+}
 
-# Initialize the LED strip
+LED_COUNT = 180
+LED_PIN = 18
+LED_FREQ_HZ = 800000
+LED_DMA = 10
+LED_BRIGHTNESS = 180
+LED_INVERT = False
+LED_CHANNEL = 0
+
+COLOR_DEFAULT = Color(255, 30, 0)
+COLOR_BLUE = Color(0, 0, 255)
+COLOR_RED = Color(255, 0, 0)
+COLOR_YELLOW = Color(255, 150, 0)
+COLOR_GREEN = Color(0, 255, 0)
+COLOR_NONE = Color(0, 0, 0)
+
+CURRENT_BASE = COLOR_DEFAULT
+
 strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
 strip.begin()
 
-# Utility: Set all LEDs to a single color
 def set_strip_color(color, start=0, end=LED_COUNT):
     for i in range(start, end):
         strip.setPixelColor(i, color)
     strip.show()
 
-# Utility: Turn off LEDs
-def clear_strip():
-    set_strip_color(Color(0, 0, 0))
+def turn_off_strip():
+    for i in range(strip.numPixels()):
+        strip.setPixelColor(i, Color(0, 0, 0))
+    strip.show()
 
-# LED colors
-COLOR_WARM_WHITE = Color(255, 147, 41)
-COLOR_BLUE = Color(0, 0, 255)
-COLOR_RED = Color(255, 0, 0)
-COLOR_GREEN = Color(0, 255, 0)
+def clear_strip(start=0, end=LED_COUNT):
+    set_strip_color(CURRENT_BASE, start, end)
 
-set_strip_color(COLOR_WARM_WHITE)
+def default_base_strip():
+    global CURRENT_BASE
+    CURRENT_BASE = COLOR_DEFAULT
+    set_strip_color(COLOR_DEFAULT)
+
+def autopilot_base_strip():
+    global CURRENT_BASE
+    CURRENT_BASE = COLOR_BLUE
+    set_strip_color(COLOR_BLUE)
+
+default_base_strip()
+
 #endregion
-
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-random_port_offset = 0
-used_port = targetPort+random_port_offset
-print("Using port " + str(used_port))
-sock.bind(("0.0.0.0", used_port))
-
-print("sending ehllo")
-sock.sendto(str.encode("ehllo"), (targetIP, targetPort))
-
-data, addr = sock.recvfrom(1024)
-parsedData = parsePandaPacket(data)
-if parsedData[0] == 15 and parsedData[1] == 6:
-    pass
-elif parsedData[0] == 15 and parsedData[1] == 7:
-    print("Connection refused")
-    exit(1)
-else:
-    print("Failed to get a valid response")
-    exit(1)
-
 
 results = {
             "Left Turn Signal Status": "UNKNOWN",
@@ -225,138 +242,276 @@ results = {
             "Charge Status": "UNKNOWN"
         }
 
-#region LED states
-# Default state
-def set_default():
-    set_strip_color(COLOR_WARM_WHITE)
+#region LED functions
+def leftTurnSignal(stop_event, blindspot_event):
+    color = COLOR_GREEN
+    start_led = LED_COUNT - 80
+    end_led = LED_COUNT
+    segment_length = 20
+    while not stop_event.is_set():
+        is_left_blindspot_active = (
+            signal_threads["left_blindspot"]["thread"] is not None and
+            signal_threads["left_blindspot"]["thread"].is_alive()
+        )
+        if is_left_blindspot_active:
+            end_led = (LED_COUNT-10)
+        else:
+            end_led = LED_COUNT
 
-# Autopilot state
-def set_autopilot():
-    set_strip_color(COLOR_BLUE)
+        for start in range(start_led, end_led - segment_length + 1):
+            if stop_event.is_set():
+                return
+            clear_strip(start_led, end_led)
+            for i in range(start, start + segment_length):
+                strip.setPixelColor(i, color)
+            strip.show()
+            time.sleep(1 / 4000.0)
+    clear_strip(start_led, end_led)
 
-# Turn signal states
-def blink_left_signal():
-    while results["Left Turn Signal Status"] == "TURN_SIGNAL_ACTIVE_HIGH":
-        set_strip_color(COLOR_RED, start=0, end=LED_COUNT // 2)
-        time.sleep(0.5)
+def rightTurnSignal(stop_event, blindspot_event):
+    color = COLOR_GREEN
+    start_led = 0
+    end_led = 80
+    segment_length = 20
+    while not stop_event.is_set():
+        is_right_blindspot_active = (
+            signal_threads["right_blindspot"]["thread"] is not None and
+            signal_threads["right_blindspot"]["thread"].is_alive()
+        )
+        if is_right_blindspot_active:
+            start_led = 10
+        else:
+            start_led = 0
+
+        for start in range(end_led - segment_length, start_led - 1, -1):
+            if stop_event.is_set():
+                return
+            clear_strip(start_led, end_led)
+            for i in range(start, start + segment_length):
+                strip.setPixelColor(i, color)
+            strip.show()
+            time.sleep(1 / 4000.0)
+    clear_strip(start_led, end_led)
+
+def leftBlindSpot(stop_event):
+    while not stop_event.is_set():
+        is_left_signal_active = (
+            signal_threads["left_turn"]["thread"] is not None and
+            signal_threads["left_turn"]["thread"].is_alive()
+        )
+        if is_left_signal_active:
+            set_strip_color(COLOR_RED, start=(LED_COUNT-10), end=LED_COUNT)
+            time.sleep(0.15)
+            set_strip_color(COLOR_NONE, start=(LED_COUNT-10), end=LED_COUNT)
+            time.sleep(0.15)
+        else:
+            set_strip_color(COLOR_RED, start=(LED_COUNT-10), end=LED_COUNT)
+    set_strip_color(CURRENT_BASE, start=(LED_COUNT-10), end=LED_COUNT)
+
+def rightBlindSpot(stop_event):
+    while not stop_event.is_set():
+        is_right_signal_active = (
+            signal_threads["right_turn"]["thread"] is not None and
+            signal_threads["right_turn"]["thread"].is_alive()
+        )
+        if is_right_signal_active:
+            set_strip_color(COLOR_RED, start=0, end=10)
+            time.sleep(0.15)
+            set_strip_color(COLOR_NONE, start=0, end=10)
+            time.sleep(0.15)
+        else:            
+            set_strip_color(COLOR_RED, start=0, end=10)
+    set_strip_color(CURRENT_BASE, start=0, end=10)
+
+def handsOnAlert(stop_event):
+    while not stop_event.is_set():
+        set_strip_color(COLOR_RED)
+        time.sleep(0.3)
         clear_strip()
-        time.sleep(0.5)
-    set_default()
+        time.sleep(0.3)
 
-def blink_right_signal():
-    while results["Right Turn Signal Status"] == "TURN_SIGNAL_ACTIVE_HIGH":
-        set_strip_color(COLOR_RED, start=LED_COUNT // 2, end=LED_COUNT)
-        time.sleep(0.5)
-        clear_strip()
-        time.sleep(0.5)
-    set_default()
+def charging(stop_event):
+    while not stop_event.is_set():
+        soc = results["SoC"]
+        soc = min(int(soc), 100)
 
-# Blindspot warning states
-def blink_left_blindspot():
-    while results["Blindspot Rear Left Status"] == "WARNING_LEVEL_1":
-        set_strip_color(COLOR_RED, start=0, end=5)
-        time.sleep(0.5)
-        clear_strip()
-        time.sleep(0.5)
-    set_default()
+        num_lit_leds = int((soc / 100.0) * LED_COUNT)
 
-def blink_right_blindspot():
-    while results["Blindspot Rear Right Status"] == "WARNING_LEVEL_1":
-        set_strip_color(COLOR_RED, start=LED_COUNT - 5, end=LED_COUNT)
-        time.sleep(0.5)
-        clear_strip()
-        time.sleep(0.5)
-    set_default()
+        for brightness in range(210, 25, -5):
+            for i in range(LED_COUNT - num_lit_leds, LED_COUNT):
+                strip.setPixelColor(i, Color(0, brightness, 0))
+            strip.show()
 
-# Charging state
-def set_charging(soc):
-    while results["Charge Status"] == 1:  # Charging active
-        green_leds = int((soc / 100) * LED_COUNT)
-        set_strip_color(COLOR_GREEN, start=0, end=green_leds)
-        clear_strip(start=green_leds, end=LED_COUNT)
-        time.sleep(0.5)
-    set_default()
+        time.sleep(0.01)
 
-#Start with Default
-set_default()
+        for brightness in range(20, 205, 5):
+            for i in range(LED_COUNT - num_lit_leds, LED_COUNT):
+                strip.setPixelColor(i, Color(0, brightness, 0))
+            strip.show()
+
+        time.sleep(0.01)
+    default_base_strip()
+
 #endregion
 
-x = threading.Thread(target=heartbeatFunction)
-x.start()
-
-for filterEntry in framesToFilter:
-    filterData = struct.pack("!BBH", 0x0F, filterEntry[0], filterEntry[1] )
-    print("Filter: " + filterData)
-    sock.sendto(filterData, (targetIP, targetPort))
-
-doPrint = True
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+random_port_offset = 0
+used_port = targetPort+random_port_offset
+print("Using port " + str(used_port))
+print("Socket timeout " + str(5))
+sock.settimeout(5)
+sock.bind(("0.0.0.0", used_port))
 
 while True:
     try:
+        print("sending cancel")
+        sock.sendto(str.encode("bye"), (targetIP, targetPort))
+        print("sending ehllo")
+        sock.sendto(str.encode("ehllo"), (targetIP, targetPort))
         data, addr = sock.recvfrom(1024)
-        dataLength = len(data)
-        packetStart = 0
+        parsedData = parsePandaPacket(data)
 
-        while packetStart < dataLength:
-            headerbytes = data[packetStart:packetStart + 8]
-
-            packetStart = packetStart + 8
-
-            unpackedHeader = struct.unpack('<II', headerbytes)
-            frameID = unpackedHeader[0] >> 21
-
-            frameLength = unpackedHeader[1] & 0x0F
-            frameBusId = unpackedHeader[1] >> 4
-            frameData = data[packetStart:packetStart+8]
+        if parsedData[0] == 15 and parsedData[1] == 6:
+            for i in range(175, 180):
+                strip.setPixelColor(i, COLOR_GREEN)
+            strip.show()
+            time.sleep(0.3)
+            clear_strip()
+            x = threading.Thread(target=heartbeatFunction)
+            x.start()
+            for filterEntry in framesToFilter:
+                filterData = struct.pack("!BBH", 0x0F, filterEntry[0], filterEntry[1] )
+                print("Filter: " + str(filterData))
+                sock.sendto(filterData, (targetIP, targetPort))
 
             doPrint = False
 
-            if (doPrint):
-                print (int(time.time() * 1000), end='')
-                print(" ", end='')
-                print("can%d " % (frameBusId), end='')
-                print("{0:03X}#".format(frameID), end='')
+            while True:
+                try:
+                    data, addr = sock.recvfrom(1024)
+                    dataLength = len(data)
+                    packetStart = 0
 
-                for payloadByte in frameData:
-                    print("{0:08b}".format(payloadByte), end=' ')
-                print("")
+                    while packetStart < dataLength:
+                        headerbytes = data[packetStart:packetStart + 8]
 
-            unpackedData = struct.unpack("<Q", frameData)[0]
+                        packetStart = packetStart + 8
 
-            if(frameID == 1013):
-                #ID3F5VCFRONT_lighting
-                results["Left Turn Signal Status"], results["Right Turn Signal Status"] = parse_turn_signals(unpackedData)
-                if results["Left Turn Signal Status"] == "TURN_SIGNAL_ACTIVE_HIGH":
-                    threading.Thread(target=blink_left_signal).start()
-                if results["Right Turn Signal Status"] == "TURN_SIGNAL_ACTIVE_HIGH":
-                    threading.Thread(target=blink_right_signal).start()
-            elif(frameID == 921):
-                #ID399DAS_status
-                autopilot_hands_on_status, autopilot_state_status, blindspot_rear_left_status, blindspot_rear_right_status = parse_autopilot_and_blindspot_signals(unpackedData)
-                results["Autopilot Hands-On Status"] = autopilot_hands_on_status
-                results["Autopilot State"] = autopilot_state_status
-                results["Blindspot Rear Left Status"] = blindspot_rear_left_status
-                results["Blindspot Rear Right Status"] = blindspot_rear_right_status
-                if results["Autopilot State"] == "ACTIVE_NOMINAL":
-                    set_autopilot()
-                if results["Blindspot Rear Left Status"] == "WARNING_LEVEL_1":
-                    threading.Thread(target=blink_left_blindspot).start()
-                if results["Blindspot Rear Right Status"] == "WARNING_LEVEL_1":
-                    threading.Thread(target=blink_right_blindspot).start()
-            elif(frameID == 826):
-                #ID33AUI_rangeSOC
-                results["SoC"] = parse_soc(unpackedData)
-            elif(frameID == 516):
-                #ID204PCS_chgStatus
-                results["Charge Status"] = parse_charge_status(unpackedData)
-                if results["Charge Status"] == 1:
-                    threading.Thread(target=set_charging, args=(results["SoC"],)).start()
-            else:
-                print("?")
-            print(results)
+                        unpackedHeader = struct.unpack('<II', headerbytes)
+                        frameID = unpackedHeader[0] >> 21
 
-            packetStart = packetStart + 8
+                        frameLength = unpackedHeader[1] & 0x0F
+                        frameBusId = unpackedHeader[1] >> 4
+                        frameData = data[packetStart:packetStart+8]
+
+                        if (doPrint):
+                            print (int(time.time() * 1000), end='')
+                            print(" ", end='')
+                            print("can%d " % (frameBusId), end='')
+                            print("{0:03X}#".format(frameID), end='')
+
+                            for payloadByte in frameData:
+                                print("{0:08b}".format(payloadByte), end=' ')
+                            print("")
+
+                        unpackedData = struct.unpack("<Q", frameData)[0]
+
+                        if(frameID == 1013):
+                            results["Left Turn Signal Status"], results["Right Turn Signal Status"] = parse_turn_signals(unpackedData)
+                            if results["Left Turn Signal Status"] in ["TURN_SIGNAL_ACTIVE_HIGH","TURN_SIGNAL_ACTIVE_LOW"]:
+                                if signal_threads["left_turn"]["thread"] is None or not signal_threads["left_turn"]["thread"].is_alive():
+                                    signal_threads["left_turn"]["event"].clear()
+                                    signal_threads["left_turn"]["thread"] = threading.Thread(target=leftTurnSignal, args=(signal_threads["left_turn"]["event"], signal_threads["left_blindspot"]["event"]))
+                                    signal_threads["left_turn"]["thread"].start()
+                            else:
+                                signal_threads["left_turn"]["event"].set()
+
+                            if results["Right Turn Signal Status"] in ["TURN_SIGNAL_ACTIVE_HIGH","TURN_SIGNAL_ACTIVE_LOW"]:
+                                if signal_threads["right_turn"]["thread"] is None or not signal_threads["right_turn"]["thread"].is_alive():
+                                    signal_threads["right_turn"]["event"].clear()
+                                    signal_threads["right_turn"]["thread"] = threading.Thread(target=rightTurnSignal, args=(signal_threads["right_turn"]["event"], signal_threads["right_blindspot"]["event"]))
+                                    signal_threads["right_turn"]["thread"].start()
+                            else:
+                                signal_threads["right_turn"]["event"].set()
+                        elif(frameID == 921):
+                            autopilot_hands_on_status, autopilot_state_status, blindspot_rear_left_status, blindspot_rear_right_status = parse_autopilot_and_blindspot_signals(unpackedData)
+                            results["Autopilot Hands-On Status"] = autopilot_hands_on_status
+                            results["Autopilot State"] = autopilot_state_status
+                            results["Blindspot Rear Left Status"] = blindspot_rear_left_status
+                            results["Blindspot Rear Right Status"] = blindspot_rear_right_status
+
+                            if results["Autopilot State"] in ["ACTIVE_NOMINAL","FSD?"]:
+                                autopilot_base_strip()
+                            else:
+                                default_base_strip()
+
+                            if results["Blindspot Rear Left Status"] in ["WARNING_LEVEL_1","WARNING_LEVEL_2"]:
+                                if signal_threads["left_blindspot"]["thread"] is None or not signal_threads["left_blindspot"]["thread"].is_alive():
+                                    signal_threads["left_blindspot"]["event"].clear()
+                                    signal_threads["left_blindspot"]["thread"] = threading.Thread(target=leftBlindSpot, args=(signal_threads["left_blindspot"]["event"],))
+                                    signal_threads["left_blindspot"]["thread"].start()
+                            else:
+                                signal_threads["left_blindspot"]["event"].set()
+
+                            if results["Blindspot Rear Right Status"] in ["WARNING_LEVEL_1","WARNING_LEVEL_2"]:
+                                if signal_threads["right_blindspot"]["thread"] is None or not signal_threads["right_blindspot"]["thread"].is_alive():
+                                    signal_threads["right_blindspot"]["event"].clear()
+                                    signal_threads["right_blindspot"]["thread"] = threading.Thread(target=rightBlindSpot, args=(signal_threads["right_blindspot"]["event"],))
+                                    signal_threads["right_blindspot"]["thread"].start()
+                            else:
+                                signal_threads["right_blindspot"]["event"].set()
+
+                            if results["Autopilot Hands-On Status"] in [
+"LC_HANDS_ON_REQD_VISUAL","LC_HANDS_ON_REQD_CHIME_1","LC_HANDS_ON_REQD_CHIME_2","LC_HANDS_ON_REQD_ESCALATED_CHIME_1","LC_HANDS_ON_REQD_ESCALATED_CHIME_2"]:
+                                if signal_threads["hands_on"]["thread"] is None or not signal_threads["hands_on"]["thread"].is_alive():
+                                    signal_threads["hands_on"]["event"].clear()
+                                    signal_threads["hands_on"]["thread"] = threading.Thread(target=handsOnAlert, args=(signal_threads["hands_on"]["event"],))
+                                    signal_threads["hands_on"]["thread"].start()
+                            else:
+                                signal_threads["hands_on"]["event"].set()
+                        elif(frameID == 826):
+                            results["SoC"] = parse_soc(unpackedData)
+                        elif(frameID == 516):
+                            results["Charge Status"] = parse_charge_status(unpackedData)
+                            if results["Charge Status"] == 1:
+                                if signal_threads["charging"]["thread"] is None or not signal_threads["charging"]["thread"].is_alive():
+                                    signal_threads["charging"]["event"].clear()
+                                    signal_threads["charging"]["thread"] = threading.Thread(target=charging, args=(signal_threads["charging"]["event"]))
+                                    signal_threads["charging"]["thread"].start()
+                            else:
+                                signal_threads["charging"]["event"].set()
+                        elif(frameID == 627):
+                            brightness = parse_brightness(unpackedData)
+                            LED_BRIGHTNESS = int(min(brightness, 70) / 100 * 255)
+                            strip.setBrightness(LED_BRIGHTNESS)
+                            strip.show()
+                        else:
+                            print("Not sure what this means, but it's okay.")
+                        packetStart = packetStart + 8
+                except Exception as e:
+                    print(e)
+                    set_strip_color(COLOR_RED)
+                    time.sleep(0.3)
+                    default_base_strip()
+                    break
+        elif parsedData[0] == 15 and parsedData[1] == 7:
+            set_strip_color(COLOR_RED)
+            time.sleep(0.3)
+            clear_strip()
+            time.sleep(0.3)
+            print("Connection refused, retrying...")
+        else:
+            set_strip_color(COLOR_RED)
+            time.sleep(0.3)
+            clear_strip()
+            time.sleep(0.3)
+            print("Failed to get a valid response, retrying...")
     except:
-        sock.sendto(b"bye", (targetIP, targetPort))
-        doshutdown = True
-        break
+        for i in range(175, 180):
+            strip.setPixelColor(i, COLOR_RED)
+        strip.show()
+        time.sleep(0.3)
+        clear_strip()
+        print("Error, retrying...")
+        time.sleep(5)
+    time.sleep(1)

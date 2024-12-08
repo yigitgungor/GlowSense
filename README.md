@@ -20,7 +20,7 @@
 2. **Set up your hardware**:
 
   Raspberry Pi Zero W
-  RGB LED strip connected via GPIO
+  Adressable RGB LED strip connected via GPIO (Pin 18)
   Ensure your Raspberry Pi has internet access and Wi-Fi setup for communication with the Commander 2 on a Tesla Model 3.
 
 3. **Install dependencies**:
@@ -29,14 +29,15 @@
     pip install -r requirements.txt
 
 4. **Configure the connection to the Tesla Model 3**:
-  Make sure your Raspberry Pi can connect to the car's CAN bus data.
-  Refer to the documentation for your specific setup to interface with Tesla's CAN system.
+  Make sure your Raspberry Pi can connect to the car's CAN bus data, for this we will enable Wi-Fi on Commander and connect Pi to this network.
+  Refer to the documentation for your specific setup to interface with Tesla's CAN system if you are using a different adapter.
 
 5. **Run the script**:
   Start the script with:
     ```bash
-    python glowsense.py
+    sudo python glowsense.py
   This will start the dynamic lighting system, responding to Tesla Model 3 events.
+  You can add this to the startup and it will search wait for connection in a loop.
 
 ## License
   This project is licensed under the GNU General Public License v3.0. You are free to use, modify, and distribute this software for personal use, as long as any derivative works are also open-source under the same license. See the LICENSE file for more details.
