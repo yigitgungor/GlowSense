@@ -4,9 +4,10 @@ import socket
 import struct
 import time
 import threading
+import json
 from rpi_ws281x import PixelStrip, Color
 
-#region CAN Decoding
+#CAN Parameters
 targetIP = '192.168.4.1'
 targetPort = 1338
 
@@ -18,6 +19,28 @@ framesToFilter = [
     [0, 0x273],
 ]
 
+#LED Strip Parameters
+LED_COUNT = 180
+LED_PIN = 18
+LED_FREQ_HZ = 800000
+LED_DMA = 10
+LED_BRIGHTNESS = 180
+LED_INVERT = False
+LED_CHANNEL = 0
+
+COLOR_DEFAULT = Color(255, 40, 0)
+COLOR_BLUE = Color(0, 0, 255)
+COLOR_RED = Color(255, 0, 0)
+COLOR_YELLOW = Color(255, 150, 0)
+COLOR_GREEN = Color(0, 255, 0)
+COLOR_NONE = Color(0, 0, 0)
+
+#Glowsense Parameters
+DEBUG = False
+LED_SIGNAL_LENGTH = 20
+LED_BLINDSPOT_LENGTH = 10
+
+#region CAN Decoding
 def extractValue(data_, valuedef):
     data = data_
     if valuedef['byteorder'] == 'little':
@@ -97,6 +120,8 @@ def parse_autopilot_and_blindspot_signals(autopilot_blindspot_frame):
     blindspot_rear_left_length = 2
     blindspot_rear_right_start_bit = 6
     blindspot_rear_right_length = 2
+    forward_collision_warning_start_bit = 22
+    forward_collision_warning_length = 2
 
     autopilot_hands_on_value_map = {
             0: "LC_HANDS_ON_NOT_REQD",
@@ -134,17 +159,25 @@ def parse_autopilot_and_blindspot_signals(autopilot_blindspot_frame):
             3: "SNA"
     }
 
+    forward_collision_warning_value_map = {
+            0: "NONE",
+            1: "FORWARD_COLLISION_WARNING",
+            3: "SNA"
+    }
+
     raw_autopilot_hands_on = get_bit_data(autopilot_blindspot_frame, autopilot_hands_on_start_bit, autopilot_hands_on_length)
     raw_autopilot_state = get_bit_data(autopilot_blindspot_frame, autopilot_state_start_bit, autopilot_state_length)
     raw_blindspot_rear_left = get_bit_data(autopilot_blindspot_frame, blindspot_rear_left_start_bit, blindspot_rear_left_length)
     raw_blindspot_rear_right = get_bit_data(autopilot_blindspot_frame, blindspot_rear_right_start_bit, blindspot_rear_right_length)
+    raw_forward_collision_warning = get_bit_data(autopilot_blindspot_frame, forward_collision_warning_start_bit, forward_collision_warning_length)
 
     autopilot_hands_on_status = process_signal(raw_autopilot_hands_on, autopilot_hands_on_value_map)
     autopilot_state_status = process_signal(raw_autopilot_state, autopilot_state_value_map)
     blindspot_rear_left_status = process_signal(raw_blindspot_rear_left, blindspot_value_map)
     blindspot_rear_right_status = process_signal(raw_blindspot_rear_right, blindspot_value_map)
+    forward_collision_warning_status = process_signal(raw_forward_collision_warning, forward_collision_warning_value_map)
 
-    return autopilot_hands_on_status, autopilot_state_status, blindspot_rear_left_status, blindspot_rear_right_status
+    return autopilot_hands_on_status, autopilot_state_status, blindspot_rear_left_status, blindspot_rear_right_status, forward_collision_warning_status
 #endregion
 
 #region Panda Connection
@@ -181,23 +214,10 @@ signal_threads = {
     "left_blindspot": {"event": threading.Event(), "thread": None},
     "right_blindspot": {"event": threading.Event(), "thread": None},
     "charging": {"event": threading.Event(), "thread": None},
-    "hands_on": {"event": threading.Event(), "thread": None}
+    "hands_on": {"event": threading.Event(), "thread": None},
+    "forward_collision": {"event": threading.Event(), "thread": None},
+    "autopilot": {"event": threading.Event(), "thread": None},
 }
-
-LED_COUNT = 180
-LED_PIN = 18
-LED_FREQ_HZ = 800000
-LED_DMA = 10
-LED_BRIGHTNESS = 180
-LED_INVERT = False
-LED_CHANNEL = 0
-
-COLOR_DEFAULT = Color(255, 30, 0)
-COLOR_BLUE = Color(0, 0, 255)
-COLOR_RED = Color(255, 0, 0)
-COLOR_YELLOW = Color(255, 150, 0)
-COLOR_GREEN = Color(0, 255, 0)
-COLOR_NONE = Color(0, 0, 0)
 
 CURRENT_BASE = COLOR_DEFAULT
 
@@ -245,112 +265,164 @@ results = {
 #region LED functions
 def leftTurnSignal(stop_event, blindspot_event):
     color = COLOR_GREEN
-    start_led = LED_COUNT - 80
+    start_led = LED_COUNT - LED_SIGNAL_LENGTH
     end_led = LED_COUNT
-    segment_length = 20
+    running = False
     while not stop_event.is_set():
         is_left_blindspot_active = (
             signal_threads["left_blindspot"]["thread"] is not None and
             signal_threads["left_blindspot"]["thread"].is_alive()
         )
         if is_left_blindspot_active:
-            end_led = (LED_COUNT-10)
+            end_led = (LED_COUNT-LED_BLINDSPOT_LENGTH)
         else:
             end_led = LED_COUNT
 
-        for start in range(start_led, end_led - segment_length + 1):
-            if stop_event.is_set():
-                return
-            clear_strip(start_led, end_led)
-            for i in range(start, start + segment_length):
-                strip.setPixelColor(i, color)
-            strip.show()
-            time.sleep(1 / 4000.0)
-    clear_strip(start_led, end_led)
+        running = True
+        set_strip_color(color, start_led, end_led)
+        time.sleep(0.45)
+        clear_strip(start_led, end_led)
+        time.sleep(0.45)
+
+    if running == True:
+        clear_strip(start_led, end_led)
+        running = False
 
 def rightTurnSignal(stop_event, blindspot_event):
     color = COLOR_GREEN
     start_led = 0
-    end_led = 80
-    segment_length = 20
+    end_led = LED_SIGNAL_LENGTH
+    running = False
     while not stop_event.is_set():
         is_right_blindspot_active = (
             signal_threads["right_blindspot"]["thread"] is not None and
             signal_threads["right_blindspot"]["thread"].is_alive()
         )
         if is_right_blindspot_active:
-            start_led = 10
+            start_led = LED_BLINDSPOT_LENGTH
         else:
             start_led = 0
 
-        for start in range(end_led - segment_length, start_led - 1, -1):
-            if stop_event.is_set():
-                return
-            clear_strip(start_led, end_led)
-            for i in range(start, start + segment_length):
-                strip.setPixelColor(i, color)
-            strip.show()
-            time.sleep(1 / 4000.0)
-    clear_strip(start_led, end_led)
+        running = True
+        set_strip_color(color, start_led, end_led)
+        time.sleep(0.45)
+        clear_strip(start_led, end_led)
+        time.sleep(0.45)
+
+    if running == True:
+        clear_strip(start_led, end_led)
+        running = False
 
 def leftBlindSpot(stop_event):
+    running = False
     while not stop_event.is_set():
         is_left_signal_active = (
             signal_threads["left_turn"]["thread"] is not None and
             signal_threads["left_turn"]["thread"].is_alive()
         )
+
+        running = True
         if is_left_signal_active:
-            set_strip_color(COLOR_RED, start=(LED_COUNT-10), end=LED_COUNT)
+            set_strip_color(COLOR_RED, start=(LED_COUNT-LED_BLINDSPOT_LENGTH), end=LED_COUNT)
             time.sleep(0.15)
-            set_strip_color(COLOR_NONE, start=(LED_COUNT-10), end=LED_COUNT)
+            set_strip_color(COLOR_NONE, start=(LED_COUNT-LED_BLINDSPOT_LENGTH), end=LED_COUNT)
             time.sleep(0.15)
         else:
-            set_strip_color(COLOR_RED, start=(LED_COUNT-10), end=LED_COUNT)
-    set_strip_color(CURRENT_BASE, start=(LED_COUNT-10), end=LED_COUNT)
+            set_strip_color(COLOR_RED, start=(LED_COUNT-LED_BLINDSPOT_LENGTH), end=LED_COUNT)
+
+    if running == True:
+        set_strip_color(CURRENT_BASE, start=(LED_COUNT-LED_BLINDSPOT_LENGTH), end=LED_COUNT)
+        running = False
+
 
 def rightBlindSpot(stop_event):
+    running = False
     while not stop_event.is_set():
         is_right_signal_active = (
             signal_threads["right_turn"]["thread"] is not None and
             signal_threads["right_turn"]["thread"].is_alive()
         )
+
+        running = True
         if is_right_signal_active:
-            set_strip_color(COLOR_RED, start=0, end=10)
+            set_strip_color(COLOR_RED, start=0, end=LED_BLINDSPOT_LENGTH)
             time.sleep(0.15)
-            set_strip_color(COLOR_NONE, start=0, end=10)
+            set_strip_color(COLOR_NONE, start=0, end=LED_BLINDSPOT_LENGTH)
             time.sleep(0.15)
-        else:            
-            set_strip_color(COLOR_RED, start=0, end=10)
-    set_strip_color(CURRENT_BASE, start=0, end=10)
+        else:
+            set_strip_color(COLOR_RED, start=0, end=LED_BLINDSPOT_LENGTH)
+
+    if running == True:
+        set_strip_color(CURRENT_BASE, start=0, end=LED_BLINDSPOT_LENGTH)
+        running = False
+
+def autopilot(stop_event):
+    running = False
+    while not stop_event.is_set():
+        if running == False:
+            running = True
+            autopilot_base_strip()
+
+    if running == True:
+        default_base_strip()
+        running = False
 
 def handsOnAlert(stop_event):
+    running = False
     while not stop_event.is_set():
-        set_strip_color(COLOR_RED)
-        time.sleep(0.3)
+        running = True
+        set_strip_color(COLOR_BLUE)
+        time.sleep(0.5)
+        set_strip_color(COLOR_NONE)
+        time.sleep(0.5)
+
+    if running == True:
         clear_strip()
-        time.sleep(0.3)
+        running = False
+
+
+def forwardCollisionAlert(stop_event):
+    running = False
+    while not stop_event.is_set():
+        running = True
+        set_strip_color(COLOR_RED)
+        time.sleep(0.15)
+        set_strip_color(COLOR_NONE)
+        time.sleep(0.15)
+
+    if running == True:
+        clear_strip()
+        running = False
 
 def charging(stop_event):
+    running = False
     while not stop_event.is_set():
+        running = True
         soc = results["SoC"]
         soc = min(int(soc), 100)
 
         num_lit_leds = int((soc / 100.0) * LED_COUNT)
-
-        for brightness in range(210, 25, -5):
+        max_brightness = max(LED_BRIGHTNESS, 130)
+        for brightness in range(max_brightness, 25, -5):
             for i in range(LED_COUNT - num_lit_leds, LED_COUNT):
                 strip.setPixelColor(i, Color(0, brightness, 0))
             strip.show()
+            time.sleep(0.05)
 
-        time.sleep(0.01)
+        time.sleep(1)
 
-        for brightness in range(20, 205, 5):
+        for brightness in range(25, max_brightness, 5):
             for i in range(LED_COUNT - num_lit_leds, LED_COUNT):
                 strip.setPixelColor(i, Color(0, brightness, 0))
             strip.show()
+            time.sleep(0.05)
 
-        time.sleep(0.01)
-    default_base_strip()
+        time.sleep(0.2)
+
+    if running == True:
+        default_base_strip()
+        running = False
+
 
 #endregion
 
@@ -384,8 +456,6 @@ while True:
                 print("Filter: " + str(filterData))
                 sock.sendto(filterData, (targetIP, targetPort))
 
-            doPrint = False
-
             while True:
                 try:
                     data, addr = sock.recvfrom(1024)
@@ -404,7 +474,7 @@ while True:
                         frameBusId = unpackedHeader[1] >> 4
                         frameData = data[packetStart:packetStart+8]
 
-                        if (doPrint):
+                        if (DEBUG):
                             print (int(time.time() * 1000), end='')
                             print(" ", end='')
                             print("can%d " % (frameBusId), end='')
@@ -412,6 +482,10 @@ while True:
 
                             for payloadByte in frameData:
                                 print("{0:08b}".format(payloadByte), end=' ')
+                            print("")
+                            print("")
+                            print(json.dumps(results))
+                            print("")
                             print("")
 
                         unpackedData = struct.unpack("<Q", frameData)[0]
@@ -434,16 +508,20 @@ while True:
                             else:
                                 signal_threads["right_turn"]["event"].set()
                         elif(frameID == 921):
-                            autopilot_hands_on_status, autopilot_state_status, blindspot_rear_left_status, blindspot_rear_right_status = parse_autopilot_and_blindspot_signals(unpackedData)
+                            autopilot_hands_on_status, autopilot_state_status, blindspot_rear_left_status, blindspot_rear_right_status, forward_collision_warning_status = parse_autopilot_and_blindspot_signals(unpackedData)
                             results["Autopilot Hands-On Status"] = autopilot_hands_on_status
                             results["Autopilot State"] = autopilot_state_status
                             results["Blindspot Rear Left Status"] = blindspot_rear_left_status
                             results["Blindspot Rear Right Status"] = blindspot_rear_right_status
+                            results["Forward Collision Warning"]= forward_collision_warning_status
 
-                            if results["Autopilot State"] in ["ACTIVE_NOMINAL","FSD?"]:
-                                autopilot_base_strip()
+                            if results["Autopilot State"] in ["ACTIVE_NOMINAL","ACTIVE_NAV","FSD?"]:
+                                if signal_threads["autopilot"]["thread"] is None or not signal_threads["autopilot"]["thread"].is_alive():
+                                    signal_threads["autopilot"]["event"].clear()
+                                    signal_threads["autopilot"]["thread"] = threading.Thread(target=autopilot, args=(signal_threads["autopilot"]["event"],))
+                                    signal_threads["autopilot"]["thread"].start()
                             else:
-                                default_base_strip()
+                                signal_threads["autopilot"]["event"].set()
 
                             if results["Blindspot Rear Left Status"] in ["WARNING_LEVEL_1","WARNING_LEVEL_2"]:
                                 if signal_threads["left_blindspot"]["thread"] is None or not signal_threads["left_blindspot"]["thread"].is_alive():
@@ -469,6 +547,15 @@ while True:
                                     signal_threads["hands_on"]["thread"].start()
                             else:
                                 signal_threads["hands_on"]["event"].set()
+
+                            if results["Forward Collision Warning"] in ["FORWARD_COLLISION_WARNING"]:
+                                if signal_threads["forward_collision"]["thread"] is None or not signal_threads["forward_collision"]["thread"].is_alive():
+                                    signal_threads["forward_collision"]["event"].clear()
+                                    signal_threads["forward_collision"]["thread"] = threading.Thread(target=forwardCollisionAlert, args=(signal_threads["forward_collision"]["event"],))
+                                    signal_threads["forward_collision"]["thread"].start()
+                            else:
+                                signal_threads["forward_collision"]["event"].set()
+
                         elif(frameID == 826):
                             results["SoC"] = parse_soc(unpackedData)
                         elif(frameID == 516):
@@ -476,13 +563,14 @@ while True:
                             if results["Charge Status"] == 1:
                                 if signal_threads["charging"]["thread"] is None or not signal_threads["charging"]["thread"].is_alive():
                                     signal_threads["charging"]["event"].clear()
-                                    signal_threads["charging"]["thread"] = threading.Thread(target=charging, args=(signal_threads["charging"]["event"]))
+                                    signal_threads["charging"]["thread"] = threading.Thread(target=charging, args=(signal_threads["charging"]["event"],))
                                     signal_threads["charging"]["thread"].start()
                             else:
                                 signal_threads["charging"]["event"].set()
                         elif(frameID == 627):
                             brightness = parse_brightness(unpackedData)
-                            LED_BRIGHTNESS = int(min(brightness, 70) / 100 * 255)
+                            brightness = 5 if brightness < 10 else brightness
+                            LED_BRIGHTNESS = int(min(brightness, 100) / 100 * 255)
                             strip.setBrightness(LED_BRIGHTNESS)
                             strip.show()
                         else:
