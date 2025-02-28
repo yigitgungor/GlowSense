@@ -7,7 +7,7 @@ import threading
 import json
 from rpi_ws281x import PixelStrip, Color
 
-#CAN Parameters
+#region CAN Decoding
 targetIP = '192.168.4.1'
 targetPort = 1338
 
@@ -17,10 +17,10 @@ framesToFilter = [
     [0, 0x33A],
     [0, 0x204],
     [0, 0x273],
+    [0, 0x118],
 ]
 
-#LED Strip Parameters
-LED_COUNT = 180
+LED_COUNT = 159
 LED_PIN = 18
 LED_FREQ_HZ = 800000
 LED_DMA = 10
@@ -35,12 +35,11 @@ COLOR_YELLOW = Color(255, 150, 0)
 COLOR_GREEN = Color(0, 255, 0)
 COLOR_NONE = Color(0, 0, 0)
 
-#Glowsense Parameters
-DEBUG = False
-LED_SIGNAL_LENGTH = 20
-LED_BLINDSPOT_LENGTH = 10
+CURRENT_BASE = COLOR_DEFAULT
 
-#region CAN Decoding
+LED_TURNSIGNAL_LENGTH = 12
+LED_BLINDSPOT_LENGTH = 7
+
 def extractValue(data_, valuedef):
     data = data_
     if valuedef['byteorder'] == 'little':
@@ -92,6 +91,34 @@ def parse_soc(soc_frame):
     soc = get_bit_data(soc_frame, soc_start_bit, soc_signal_length)
 
     return soc
+
+def parse_gear(drive_system_status_frame):
+    gear_start_bit = 21
+    gear_signal_length = 3
+
+    gear_value_map = {
+        7: "DI_GEAR_SNA",
+        6: "",
+        5: "",
+        4: "DI_GEAR_D",
+        3: "DI_GEAR_N",
+        2: "DI_GEAR_R",
+        1: "DI_GEAR_P",
+        0: "DI_GEAR_INVALID"
+    }
+
+    raw_gear = get_bit_data(drive_system_status_frame, gear_start_bit, gear_signal_length)
+    gear_status = process_signal(raw_gear, gear_value_map)
+
+    return gear_status
+
+def parse_lock(ui_frame):
+    lock_start_bit = 15
+    lock_signal_length = 1
+
+    lock_status = get_bit_data(ui_frame, lock_start_bit, lock_signal_length)
+
+    return lock_status
 
 def parse_brightness(ui_frame):
     brightness_start_bit = 32
@@ -219,8 +246,6 @@ signal_threads = {
     "autopilot": {"event": threading.Event(), "thread": None},
 }
 
-CURRENT_BASE = COLOR_DEFAULT
-
 strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
 strip.begin()
 
@@ -259,13 +284,15 @@ results = {
             "Blindspot Rear Left Status": "UNKNOWN",
             "Blindspot Rear Right Status": "UNKNOWN",
             "SoC": "UNKNOWN",
-            "Charge Status": "UNKNOWN"
+            "Charge Status": "UNKNOWN",
+            "Gear Status": "UNKNOWN",
+            "Lock Status": "UNKNOWN"
         }
 
 #region LED functions
 def leftTurnSignal(stop_event, blindspot_event):
     color = COLOR_GREEN
-    start_led = LED_COUNT - LED_SIGNAL_LENGTH
+    start_led = LED_COUNT - LED_TURNSIGNAL_LENGTH
     end_led = LED_COUNT
     running = False
     while not stop_event.is_set():
@@ -291,7 +318,7 @@ def leftTurnSignal(stop_event, blindspot_event):
 def rightTurnSignal(stop_event, blindspot_event):
     color = COLOR_GREEN
     start_led = 0
-    end_led = LED_SIGNAL_LENGTH
+    end_led = LED_TURNSIGNAL_LENGTH
     running = False
     while not stop_event.is_set():
         is_right_blindspot_active = (
@@ -402,8 +429,7 @@ def charging(stop_event):
         soc = min(int(soc), 100)
 
         num_lit_leds = int((soc / 100.0) * LED_COUNT)
-        max_brightness = max(LED_BRIGHTNESS, 130)
-        for brightness in range(max_brightness, 25, -5):
+        for brightness in range(130, 25, -5):
             for i in range(LED_COUNT - num_lit_leds, LED_COUNT):
                 strip.setPixelColor(i, Color(0, brightness, 0))
             strip.show()
@@ -411,7 +437,7 @@ def charging(stop_event):
 
         time.sleep(1)
 
-        for brightness in range(25, max_brightness, 5):
+        for brightness in range(25, 130, 5):
             for i in range(LED_COUNT - num_lit_leds, LED_COUNT):
                 strip.setPixelColor(i, Color(0, brightness, 0))
             strip.show()
@@ -444,7 +470,7 @@ while True:
         parsedData = parsePandaPacket(data)
 
         if parsedData[0] == 15 and parsedData[1] == 6:
-            for i in range(175, 180):
+            for i in range(LED_COUNT-5, LED_COUNT):
                 strip.setPixelColor(i, COLOR_GREEN)
             strip.show()
             time.sleep(0.3)
@@ -456,8 +482,11 @@ while True:
                 print("Filter: " + str(filterData))
                 sock.sendto(filterData, (targetIP, targetPort))
 
+            doPrint = False
+
             while True:
                 try:
+                    #print(json.dumps(results))
                     data, addr = sock.recvfrom(1024)
                     dataLength = len(data)
                     packetStart = 0
@@ -474,7 +503,7 @@ while True:
                         frameBusId = unpackedHeader[1] >> 4
                         frameData = data[packetStart:packetStart+8]
 
-                        if (DEBUG):
+                        if (doPrint):
                             print (int(time.time() * 1000), end='')
                             print(" ", end='')
                             print("can%d " % (frameBusId), end='')
@@ -482,10 +511,6 @@ while True:
 
                             for payloadByte in frameData:
                                 print("{0:08b}".format(payloadByte), end=' ')
-                            print("")
-                            print("")
-                            print(json.dumps(results))
-                            print("")
                             print("")
 
                         unpackedData = struct.unpack("<Q", frameData)[0]
@@ -515,7 +540,7 @@ while True:
                             results["Blindspot Rear Right Status"] = blindspot_rear_right_status
                             results["Forward Collision Warning"]= forward_collision_warning_status
 
-                            if results["Autopilot State"] in ["ACTIVE_NOMINAL","ACTIVE_NAV","FSD?"]:
+                            if results["Autopilot State"] in ["ACTIVE_NOMINAL","ACTIVE_RESTRICTED","ACTIVE_NAV","FSD?"]:
                                 if signal_threads["autopilot"]["thread"] is None or not signal_threads["autopilot"]["thread"].is_alive():
                                     signal_threads["autopilot"]["event"].clear()
                                     signal_threads["autopilot"]["thread"] = threading.Thread(target=autopilot, args=(signal_threads["autopilot"]["event"],))
@@ -573,6 +598,8 @@ while True:
                             LED_BRIGHTNESS = int(min(brightness, 100) / 100 * 255)
                             strip.setBrightness(LED_BRIGHTNESS)
                             strip.show()
+                        elif(frameID == 280):
+                            results["Gear Status"] = parse_gear(unpackedData)
                         else:
                             print("Not sure what this means, but it's okay.")
                         packetStart = packetStart + 8
@@ -595,7 +622,7 @@ while True:
             time.sleep(0.3)
             print("Failed to get a valid response, retrying...")
     except:
-        for i in range(175, 180):
+        for i in range(LED_COUNT-5, LED_COUNT):
             strip.setPixelColor(i, COLOR_RED)
         strip.show()
         time.sleep(0.3)
